@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; background: #1e1e1e; color: #e8e8e8;
+    font-family: system-ui, sans-serif;
+    display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; justify-content: center;
+    padding: 24px; box-sizing: border-box;
+  }
+  canvas { max-width: 100%; height: auto; border-radius: 6px; box-shadow: 0 6px 24px #0008; cursor: pointer; }
+  #panel { width: 260px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { margin: 0; font-size: 22px; }
+  .card { background: #2a2a2a; border-radius: 8px; padding: 12px 14px; }
+  .row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; }
+  .dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 8px; vertical-align: -2px; border: 1px solid #888; }
+  .dot.b { background: #111; } .dot.w { background: #f4f4f4; }
+  button, select {
+    background: #3a3a3a; color: inherit; border: 1px solid #555; border-radius: 6px;
+    padding: 8px 12px; font-size: 14px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #4a4a4a; }
+  button:disabled { opacity: .4; cursor: default; }
+  .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #status { font-weight: 600; min-height: 2.6em; }
+  #msg { color: #e6b450; min-height: 1.3em; font-size: 13px; }
+  #rules summary { cursor: pointer; font-weight: 600; }
+  #rules h3 { margin: 12px 0 4px; font-size: 14px; color: #e6b450; }
+  #rules ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.45; }
+  #rules[open] { max-height: 60vh; overflow-y: auto; }
+  small { color: #999; }
+</style>
+</head>
+<body>
+<canvas id="board" width="640" height="640"></canvas>
+<div id="panel">
+  <h1>Go</h1>
+  <div class="card">
+    <div id="status"></div>
+    <div id="msg"></div>
+  </div>
+  <div class="card">
+    <div class="row"><span><span class="dot b"></span>Black</span><span id="capB">0 captured</span></div>
+    <div class="row"><span><span class="dot w"></span>White</span><span id="capW">0 captured</span></div>
+    <div class="row" id="scoreRow" hidden><small id="score"></small></div>
+  </div>
+  <div class="buttons">
+    <button id="pass">Pass</button>
+    <button id="undo">Undo</button>
+    <button id="resign">Resign</button>
+    <button id="done" hidden>Finish scoring</button>
+  </div>
+  <div class="card">
+    <div class="row">
+      <label for="size">Board</label>
+      <select id="size"><option selected>9</option><option>13</option><option>19</option></select>
+    </div>
+    <div class="row">
+      <label for="komi">Komi</label>
+      <select id="komi"><option>0</option><option>5.5</option><option selected>6.5</option><option>7.5</option></select>
+    </div>
+    <div class="row">
+      <label for="side">You play</label>
+      <select id="side"><option value="black" selected>Black</option><option value="white">White</option><option value="two">Two players</option></select>
+    </div>
+    <div class="row">
+      <label for="level">Strength</label>
+      <select id="level"><option value="500">Easy</option><option value="2000" selected>Medium</option><option value="6000">Hard</option></select>
+    </div>
+    <div class="row"><button id="new" style="width:100%">New game</button></div>
+  </div>
+  <details class="card" id="rules">
+    <summary>How to play</summary>
+    <h3>Basics</h3>
+    <ul>
+      <li>Black and White take turns placing one stone on an intersection. Black goes first.</li>
+      <li>Stones never move. They can only be captured.</li>
+      <li>Goal: control more of the board than your opponent.</li>
+    </ul>
+    <h3>Capture</h3>
+    <ul>
+      <li>A <b>liberty</b> is an empty point directly next to a stone (not diagonal).</li>
+      <li>Touching stones of one colour form a group and share liberties.</li>
+      <li>A group with no liberties is captured and removed.</li>
+      <li>A group with one liberty left is in <b>atari</b>.</li>
+    </ul>
+    <h3>Illegal moves</h3>
+    <ul>
+      <li><b>Suicide:</b> you can't leave your own group with no liberties, unless the move captures.</li>
+      <li><b>Ko:</b> you can't repeat an earlier board position.</li>
+    </ul>
+    <h3>Ending and scoring</h3>
+    <ul>
+      <li>Press <b>Pass</b> instead of playing. Two passes in a row end the game.</li>
+      <li>Click groups that can't survive to mark them dead, then press Finish scoring.</li>
+      <li>Score = your living stones + empty points only you surround. White also gets komi.</li>
+    </ul>
+    <h3>Tips</h3>
+    <ul>
+      <li>A group with two separate eyes can't be captured.</li>
+      <li>Claim corners first, then sides, then the centre.</li>
+    </ul>
+  </details>
+  <small>Rules: area (Chinese) scoring, positional superko, no suicide. After two passes, click groups to mark them dead, then finish scoring.</small>
+</div>
+<script>
+const BLACK = 1, WHITE = 2, EMPTY = 0;
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const $ = id => document.getElementById(id);
+
+let N, komi, history, phase, dead, hover, winnerText;
+// history entries: { board: Uint8Array, turn, caps: [b, w], passes, last }
+
+const cur = () => history[history.length - 1];
+const idx = (x, y) => y * N + x;
+const other = c => 3 - c;
+
+function neighbors(i) {
+  const x = i % N, y = (i / N) | 0, out = [];
+  if (x > 0) out.push(i - 1);
+  if (x < N - 1) out.push(i + 1);
+  if (y > 0) out.push(i - N);
+  if (y < N - 1) out.push(i + N);
+  return out;
+}
+
+// Connected group of same-colour stones containing i, plus its liberties.
+function group(board, i) {
+  const color = board[i], stones = [i], seen = new Set([i]), libs = new Set();
+  for (let k = 0; k < stones.length; k++) {
+    for (const n of neighbors(stones[k])) {
+      if (board[n] === EMPTY) libs.add(n);
+      else if (board[n] === color && !seen.has(n)) { seen.add(n); stones.push(n); }
+    }
+  }
+  return { stones, libs };
+}
+
+// Returns the resulting state for a move, or { error } if illegal.
+function tryMove(state, i) {
+  if (state.board[i] !== EMPTY) return { error: 'That point is occupied.' };
+  const board = state.board.slice(), me = state.turn, foe = other(me);
+  board[i] = me;
+  let captured = 0;
+  for (const n of neighbors(i)) {
+    if (board[n] === foe) {
+      const g = group(board, n);
+      if (g.libs.size === 0) { for (const s of g.stones) board[s] = EMPTY; captured += g.stones.length; }
+    }
+  }
+  if (group(board, i).libs.size === 0) return { error: 'Suicide is not allowed.' };
+  const key = board.join('');
+  if (history.some(h => (h.key ??= h.board.join('')) === key)) return { error: 'Ko: that repeats an earlier position.' };
+  const caps = state.caps.slice();
+  caps[me - 1] += captured;
+  return { state: { board, turn: foe, caps, passes: 0, last: i } };
+}
+
+function newGame() {
+  N = +$('size').value;
+  komi = +$('komi').value;
+  history = [{ board: new Uint8Array(N * N), turn: BLACK, caps: [0, 0], passes: 0, last: -1 }];
+  phase = 'play';
+  dead = new Set();
+  hover = -1;
+  winnerText = '';
+  cancelAi();
+  const side = $('side').value;
+  aiColor = side === 'black' ? WHITE : side === 'white' ? BLACK : 0;
+  initSim();
+  say('');
+  render();
+  maybeAi();
+}
+
+function say(t) { $('msg').textContent = t; }
+
+function play(i) {
+  const r = tryMove(cur(), i);
+  if (r.error) { say(r.error); return; }
+  say('');
+  history.push(r.state);
+  render();
+  maybeAi();
+}
+
+function pass() {
+  const s = cur();
+  history.push({ board: s.board, turn: other(s.turn), caps: s.caps, passes: s.passes + 1, last: -1 });
+  if (s.passes + 1 >= 2) { phase = 'scoring'; dead = new Set(); }
+  say('');
+  render();
+  maybeAi();
+}
+
+function undo() {
+  if (history.length < 2) return;
+  cancelAi();
+  history.pop();
+  while (aiColor && cur().turn === aiColor && history.length > 1) history.pop();
+  phase = 'play'; dead = new Set(); winnerText = '';
+  say('');
+  render();
+  maybeAi();
+}
+
+function resign() {
+  if (phase === 'over') return;
+  cancelAi();
+  const loser = cur().turn;
+  phase = 'over';
+  winnerText = (loser === BLACK ? 'White' : 'Black') + ' wins by resignation.';
+  render();
+}
+
+// Area scoring with dead stones removed. Returns { black, white, territory: Map(i -> colour) }.
+function computeScore() {
+  const board = cur().board, territory = new Map();
+  let black = 0, white = 0;
+  const seen = new Set();
+  for (let i = 0; i < N * N; i++) {
+    if (board[i] !== EMPTY && !dead.has(i)) {
+      board[i] === BLACK ? black++ : white++;
+    }
+  }
+  for (let i = 0; i < N * N; i++) {
+    if (seen.has(i) || (board[i] !== EMPTY && !dead.has(i))) continue;
+    const region = [i], borders = new Set();
+    seen.add(i);
+    for (let k = 0; k < region.length; k++) {
+      for (const n of neighbors(region[k])) {
+        if (board[n] !== EMPTY && !dead.has(n)) borders.add(board[n]);
+        else if (!seen.has(n)) { seen.add(n); region.push(n); }
+      }
+    }
+    if (borders.size === 1) {
+      const c = [...borders][0];
+      for (const p of region) territory.set(p, c);
+      c === BLACK ? (black += region.length) : (white += region.length);
+    }
+  }
+  return { black, white: white + komi, territory };
+}
+
+function finishScoring() {
+  const s = computeScore();
+  const diff = Math.abs(s.black - s.white);
+  phase = 'over';
+  winnerText = s.black === s.white ? 'Draw.' :
+    (s.black > s.white ? 'Black' : 'White') + ' wins by ' + diff + ' points.';
+  render();
+}
+
+function toggleDead(i) {
+  const board = cur().board;
+  if (board[i] === EMPTY) return;
+  const g = group(board, i).stones, remove = !dead.has(i);
+  for (const s of g) remove ? dead.add(s) : dead.delete(s);
+  render();
+}
+
+// ---------- computer opponent: Monte Carlo tree search ----------
+let aiColor = 0, aiToken = 0, aiBusy = false;   // aiColor 0 = two human players
+let NB, DIAG, mark, markGen, gbuf, gcount, newKo;
+const capBuf = [];
+
+function initSim() {
+  NB = []; DIAG = [];
+  for (let i = 0; i < N * N; i++) {
+    NB.push(neighbors(i));
+    const x = i % N, y = (i / N) | 0, d = [];
+    for (const dx of [-1, 1]) for (const dy of [-1, 1]) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < N && ny >= 0 && ny < N) d.push(idx(nx, ny));
+    }
+    DIAG.push(d);
+  }
+  mark = new Int32Array(N * N); markGen = 0; gbuf = new Int32Array(N * N);
+}
+
+// Liberty count of the group at i; its stones are left in gbuf[0..gcount).
+function groupLibs(b, i) {
+  const color = b[i];
+  let n = 0, libs = 0;
+  markGen++;
+  gbuf[n++] = i; mark[i] = markGen;
+  for (let k = 0; k < n; k++) {
+    const nb = NB[gbuf[k]];
+    for (let j = 0; j < nb.length; j++) {
+      const q = nb[j];
+      if (mark[q] === markGen) continue;
+      const v = b[q];
+      if (v === EMPTY) { mark[q] = markGen; libs++; }
+      else if (v === color) { mark[q] = markGen; gbuf[n++] = q; }
+    }
+  }
+  gcount = n;
+  return libs;
+}
+
+function findLiberty(b) {
+  for (let k = 0; k < gcount; k++) {
+    const nb = NB[gbuf[k]];
+    for (let j = 0; j < nb.length; j++) if (b[nb[j]] === EMPTY) return nb[j];
+  }
+  return -1;
+}
+
+// Plays i in place. Returns the number of stones captured, or -1 if illegal
+// (occupied, simple ko, suicide). Sets newKo; capBuf holds the captured stones.
+function place(b, i, color, ko) {
+  if (b[i] !== EMPTY || i === ko) return -1;
+  const foe = 3 - color, nb = NB[i];
+  b[i] = color;
+  capBuf.length = 0;
+  for (let j = 0; j < nb.length; j++) {
+    const q = nb[j];
+    if (b[q] === foe && groupLibs(b, q) === 0) {
+      for (let k = 0; k < gcount; k++) { capBuf.push(gbuf[k]); b[gbuf[k]] = EMPTY; }
+    }
+  }
+  newKo = -1;
+  if (capBuf.length === 0) {
+    if (groupLibs(b, i) === 0) { b[i] = EMPTY; return -1; }
+  } else if (capBuf.length === 1 && groupLibs(b, i) === 1 && gcount === 1) {
+    newKo = capBuf[0];
+  }
+  return capBuf.length;
+}
+
+function unplace(b, i, color) {
+  b[i] = EMPTY;
+  for (const c of capBuf) b[c] = 3 - color;
+}
+
+// A point surrounded by own stones that the opponent cannot easily break.
+function isEye(b, i, color) {
+  const nb = NB[i];
+  for (let j = 0; j < nb.length; j++) if (b[nb[j]] !== color) return false;
+  const d = DIAG[i];
+  let bad = d.length < 4 ? 1 : 0;
+  for (let j = 0; j < d.length; j++) if (b[d[j]] === 3 - color) bad++;
+  return bad < 2;
+}
+
+// Playout policy: capture or rescue a group in atari next to the last move.
+function heuristicMove(b, turn, last, ko) {
+  if (last < 0) return -1;
+  const nb = NB[last];
+  for (let j = -1; j < nb.length; j++) {
+    const q = j < 0 ? last : nb[j];
+    if (b[q] === EMPTY || groupLibs(b, q) !== 1) continue;
+    const lib = findLiberty(b), own = b[q] === turn;
+    if (place(b, lib, turn, ko) < 0) continue;
+    if (own && groupLibs(b, lib) < 2) { unplace(b, lib, turn); continue; }
+    return lib;
+  }
+  return -1;
+}
+
+function randomMove(b, turn, ko) {
+  const total = N * N, start = (Math.random() * total) | 0;
+  for (let k = 0; k < total; k++) {
+    let i = start + k;
+    if (i >= total) i -= total;
+    if (b[i] !== EMPTY || i === ko || isEye(b, i, turn)) continue;
+    if (place(b, i, turn, ko) >= 0) return i;
+  }
+  return -1;
+}
+
+// Tromp-Taylor area winner of a finished playout, komi included.
+function areaWinner(b) {
+  const total = N * N;
+  let black = 0, white = 0;
+  markGen++;
+  for (let i = 0; i < total; i++) {
+    if (b[i] === BLACK) black++; else if (b[i] === WHITE) white++;
+  }
+  for (let i = 0; i < total; i++) {
+    if (b[i] !== EMPTY || mark[i] === markGen) continue;
+    let n = 0, touchB = false, touchW = false;
+    gbuf[n++] = i; mark[i] = markGen;
+    for (let k = 0; k < n; k++) {
+      const nb = NB[gbuf[k]];
+      for (let j = 0; j < nb.length; j++) {
+        const q = nb[j], v = b[q];
+        if (v === EMPTY) { if (mark[q] !== markGen) { mark[q] = markGen; gbuf[n++] = q; } }
+        else if (v === BLACK) touchB = true;
+        else touchW = true;
+      }
+    }
+    if (touchB && !touchW) black += n; else if (touchW && !touchB) white += n;
+  }
+  return black > white + komi ? BLACK : WHITE;
+}
+
+function playout(b, turn, ko, last) {
+  let passes = 0;
+  for (let m = 0, max = N * N * 2; m < max && passes < 2; m++) {
+    let mv = heuristicMove(b, turn, last, ko);
+    if (mv < 0) mv = randomMove(b, turn, ko);
+    if (mv < 0) { passes++; ko = -1; last = -1; }
+    else { passes = 0; ko = newKo; last = mv; }
+    turn = 3 - turn;
+  }
+  return areaWinner(b);
+}
+
+// Empty points worth searching, shuffled. On big boards only those near stones.
+function candidates(b, turn, isRoot) {
+  const total = N * N, out = [];
+  let near = null;
+  if (N > 13) {
+    near = new Uint8Array(total);
+    let any = false;
+    for (let i = 0; i < total; i++) {
+      if (b[i] === EMPTY) continue;
+      any = true;
+      const x = i % N, y = (i / N) | 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < N && ny >= 0 && ny < N) near[idx(nx, ny)] = 1;
+      }
+    }
+    if (!any) return [idx(3, 3), idx(N - 4, 3), idx(3, N - 4), idx(N - 4, N - 4)];
+  }
+  for (let i = 0; i < total; i++) {
+    if (b[i] !== EMPTY || (near && !near[i]) || isEye(b, i, turn)) continue;
+    if (isRoot && tryMove(cur(), i).error) continue;
+    out.push(i);
+  }
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+// One MCTS iteration: expand or select down the tree, random playout, back up.
+function iterate(root, s) {
+  const b = s.board.slice();
+  let node = root, turn = s.turn, ko = -1, last = -1, expanded = false;
+  while (!expanded) {
+    if (node.untried === null) node.untried = candidates(b, turn, node === root);
+    let child = null;
+    while (node.untried.length) {
+      const mv = node.untried.pop();
+      if (place(b, mv, turn, ko) >= 0) {
+        child = { move: mv, parent: node, children: [], untried: null, wins: 0, visits: 0, player: turn };
+        node.children.push(child);
+        expanded = true;
+        break;
+      }
+    }
+    if (!child && node.children.length) {
+      const ln = Math.log(node.visits + 1);
+      let best = -1;
+      for (const c of node.children) {
+        const v = c.wins / c.visits + 0.6 * Math.sqrt(ln / c.visits);
+        if (v > best) { best = v; child = c; }
+      }
+      if (place(b, child.move, turn, ko) < 0) child = null;
+    }
+    if (!child) break;
+    node = child; ko = newKo; last = child.move; turn = 3 - turn;
+  }
+  const winner = playout(b, turn, ko, last);
+  for (let n = node; n; n = n.parent) {
+    n.visits++;
+    if (n.player === winner) n.wins++;
+  }
+}
+
+function humanTurn() { return !aiColor || cur().turn !== aiColor; }
+
+function maybeAi() {
+  if (phase !== 'play' || !aiColor || cur().turn !== aiColor || aiBusy) return;
+  aiBusy = true;
+  updatePanel();
+  const token = ++aiToken, ms = +$('level').value;
+  setTimeout(() => think(token, ms), 30);   // let the UI repaint first
+}
+
+function cancelAi() { aiToken++; aiBusy = false; }
+
+function think(token, ms) {
+  const s = cur();
+  const root = { move: -1, parent: null, children: [], untried: null, wins: 0, visits: 0, player: other(s.turn) };
+  const t0 = performance.now();
+
+  const finish = () => {
+    aiBusy = false;
+    let best = null;
+    for (const c of root.children) if (!best || c.visits > best.visits) best = c;
+    if (!best) { pass(); return; }
+    const rate = best.wins / best.visits;
+    if (s.passes > 0 && rate >= 0.55 && history.length > N) {
+      pass();
+      say('Computer passes.');
+      return;
+    }
+    play(best.move);
+    say('Computer win chance: ' + Math.round(rate * 100) + '%');
+  };
+
+  const step = () => {
+    if (token !== aiToken) return;
+    const sliceEnd = performance.now() + 30;
+    do { iterate(root, s); } while (performance.now() < sliceEnd);
+    if (performance.now() - t0 < ms) setTimeout(step, 0); else finish();
+  };
+  step();
+}
+
+// ---------- rendering ----------
+function layout() {
+  const size = canvas.width, margin = size / (N + 1);
+  return { size, margin, cell: (size - 2 * margin) / (N - 1) };
+}
+const px = (v, L) => L.margin + v * L.cell;
+
+function starPoints() {
+  if (N === 19) return [3, 9, 15].flatMap(x => [3, 9, 15].map(y => [x, y]));
+  if (N === 13) return [[3, 3], [9, 3], [3, 9], [9, 9], [6, 6]];
+  return [[2, 2], [6, 2], [2, 6], [6, 6], [4, 4]];
+}
+
+function stone(x, y, color, r, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const g = ctx.createRadialGradient(x - r * .35, y - r * .35, r * .1, x, y, r);
+  if (color === BLACK) { g.addColorStop(0, '#555'); g.addColorStop(1, '#000'); }
+  else { g.addColorStop(0, '#fff'); g.addColorStop(1, '#c9c9c9'); }
+  ctx.shadowColor = '#0006'; ctx.shadowBlur = r * .3; ctx.shadowOffsetY = r * .1;
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  const L = layout(), s = cur(), r = L.cell * 0.47;
+  ctx.fillStyle = '#d9a95b';
+  ctx.fillRect(0, 0, L.size, L.size);
+
+  ctx.strokeStyle = '#3b2a10'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) {
+    ctx.moveTo(px(i, L), px(0, L)); ctx.lineTo(px(i, L), px(N - 1, L));
+    ctx.moveTo(px(0, L), px(i, L)); ctx.lineTo(px(N - 1, L), px(i, L));
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = '#3b2a10';
+  for (const [x, y] of starPoints()) {
+    ctx.beginPath(); ctx.arc(px(x, L), px(y, L), L.cell * .09, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.fillStyle = '#5a4220';
+  ctx.font = Math.max(10, L.cell * .38) + 'px system-ui';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const letters = 'ABCDEFGHJKLMNOPQRST';
+  for (let i = 0; i < N; i++) {
+    ctx.fillText(letters[i], px(i, L), L.margin * .5);
+    ctx.fillText(N - i, L.margin * .5, px(i, L));
+  }
+
+  const score = phase !== 'play' ? computeScore() : null;
+
+  for (let i = 0; i < N * N; i++) {
+    const c = s.board[i];
+    if (c === EMPTY) continue;
+    const x = px(i % N, L), y = px((i / N) | 0, L);
+    stone(x, y, c, r, dead.has(i) ? 0.35 : 1);
+  }
+
+  if (score) {
+    for (const [i, c] of score.territory) {
+      const x = px(i % N, L), y = px((i / N) | 0, L), q = L.cell * .16;
+      ctx.fillStyle = c === BLACK ? '#000' : '#fff';
+      ctx.fillRect(x - q, y - q, q * 2, q * 2);
+    }
+  }
+
+  if (s.last >= 0) {
+    const x = px(s.last % N, L), y = px((s.last / N) | 0, L);
+    ctx.strokeStyle = s.board[s.last] === BLACK ? '#fff' : '#000';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, r * .45, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  if (phase === 'play' && humanTurn() && hover >= 0 && s.board[hover] === EMPTY) {
+    stone(px(hover % N, L), px((hover / N) | 0, L), s.turn, r, 0.45);
+  }
+}
+
+function updatePanel() {
+  const s = cur();
+  $('capB').textContent = s.caps[0] + ' captured';
+  $('capW').textContent = s.caps[1] + ' captured';
+  const name = s.turn === BLACK ? 'Black' : 'White';
+  $('status').textContent =
+    phase === 'play' && aiBusy ? 'Computer is thinking...' :
+    phase === 'play' ? name + ' to play' + (s.passes ? ' (opponent passed)' : '') :
+    phase === 'scoring' ? 'Both passed. Click groups to mark them dead/alive.' :
+    winnerText;
+  $('pass').disabled = phase !== 'play' || !humanTurn();
+  $('resign').disabled = phase === 'over';
+  $('undo').disabled = history.length < (aiColor === BLACK ? 3 : 2);
+  $('done').hidden = phase !== 'scoring';
+  $('scoreRow').hidden = phase === 'play';
+  if (phase !== 'play') {
+    const sc = computeScore();
+    $('score').textContent = 'Black ' + sc.black + ' | White ' + sc.white + ' (incl. ' + komi + ' komi)';
+  }
+}
+
+function render() { draw(); updatePanel(); }
+
+// ---------- input ----------
+function pointFromEvent(e) {
+  const rect = canvas.getBoundingClientRect(), L = layout();
+  const sx = canvas.width / rect.width;
+  const x = Math.round(((e.clientX - rect.left) * sx - L.margin) / L.cell);
+  const y = Math.round(((e.clientY - rect.top) * sx - L.margin) / L.cell);
+  return x < 0 || y < 0 || x >= N || y >= N ? -1 : idx(x, y);
+}
+
+canvas.addEventListener('mousemove', e => {
+  const h = pointFromEvent(e);
+  if (h !== hover) { hover = h; draw(); }
+});
+canvas.addEventListener('mouseleave', () => { hover = -1; draw(); });
+canvas.addEventListener('click', e => {
+  const i = pointFromEvent(e);
+  if (i < 0) return;
+  if (phase === 'play') { if (humanTurn()) play(i); }
+  else if (phase === 'scoring') toggleDead(i);
+});
+
+$('pass').onclick = pass;
+$('undo').onclick = undo;
+$('resign').onclick = resign;
+$('done').onclick = finishScoring;
+$('new').onclick = newGame;
+$('size').onchange = newGame;
+$('side').onchange = newGame;
+
+newGame();
+</script>
+</body>
+</html>
